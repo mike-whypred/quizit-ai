@@ -1,38 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
 export async function POST(request: NextRequest) {
   try {
-    const { markdown, questionCount, title } = await request.json();
+    const { markdown, content, contentType, questionCount, title } = await request.json();
 
-    if (!markdown || !questionCount) {
+    const textContent = markdown || content;
+    const isPdf = contentType === 'pdf';
+
+    if (!textContent || !questionCount) {
       return NextResponse.json(
-        { error: 'Markdown content and question count are required' },
+        { error: 'Content and question count are required' },
         { status: 400 }
       );
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.ANTHROPIC_API_KEY) {
       return NextResponse.json(
-        { error: 'OpenAI API key not configured' },
+        { error: 'Anthropic API key not configured' },
         { status: 500 }
       );
     }
 
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-
-    // Truncate markdown if too long (to avoid token limits)
-    const maxLength = 8000;
-    const truncatedMarkdown = markdown.length > maxLength 
-      ? markdown.substring(0, maxLength) + '...'
-      : markdown;
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const model = process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
 
     const prompt = `Based on the following content, create exactly ${questionCount} multiple-choice quiz questions. Each question should have exactly 3 answer options. Make the questions challenging but fair, covering key concepts from the content.
-
-Content:
-${truncatedMarkdown}
 
 Return your response as a JSON object with this exact structure:
 {
@@ -50,40 +43,46 @@ Important:
 - Each question must have exactly 3 options
 - correctAnswer is the index (0, 1, or 2) of the correct option
 - Make questions diverse and cover different aspects of the content
-- Ensure all questions are directly related to the content provided`;
+- Ensure all questions are directly related to the content provided
+- Return ONLY valid JSON, no additional text`;
 
-    // Get model from environment variable, default to gpt-5-mini
-    const model = process.env.GPT_MODEL || 'gpt-5-mini';
-    
-    // Build completion parameters
-    const completionParams: any = {
+    let userContent: Anthropic.MessageParam['content'];
+
+    if (isPdf) {
+      userContent = [
+        {
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: 'application/pdf',
+            data: textContent,
+          },
+        } as any,
+        { type: 'text', text: prompt },
+      ];
+    } else {
+      const maxLength = 30000;
+      const truncated =
+        textContent.length > maxLength
+          ? textContent.substring(0, maxLength) + '...'
+          : textContent;
+      userContent = [{ type: 'text', text: `Content:\n${truncated}\n\n${prompt}` }];
+    }
+
+    const response = await client.messages.create({
       model,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a helpful assistant that creates educational quiz questions. Always respond with valid JSON only, no additional text.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      response_format: { type: 'json_object' },
-    };
-    
-    // Only add temperature for models that support it (not gpt-5-mini)
-    if (!model.includes('gpt-5-mini')) {
-      completionParams.temperature = 0.7;
-    }
-    
-    const completion = await openai.chat.completions.create(completionParams);
+      max_tokens: 2048,
+      system:
+        'You are a helpful assistant that creates educational quiz questions. Always respond with valid JSON only, no additional text.',
+      messages: [{ role: 'user', content: userContent }],
+    });
 
-    const responseContent = completion.choices[0].message.content;
-    if (!responseContent) {
-      throw new Error('No response from OpenAI');
-    }
+    const responseText =
+      response.content[0].type === 'text' ? response.content[0].text : '';
 
-    const quizData = JSON.parse(responseContent);
+    // Parse JSON, handling potential markdown code blocks
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    const quizData = JSON.parse(jsonMatch ? jsonMatch[0] : responseText);
 
     return NextResponse.json({
       quiz: {
@@ -99,5 +98,3 @@ Important:
     );
   }
 }
-
-

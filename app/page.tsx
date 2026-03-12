@@ -1,10 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Quiz, UserAnswer } from './types';
 
+type InputMode = 'url' | 'file';
+
 export default function Home() {
+  const [inputMode, setInputMode] = useState<InputMode>('url');
   const [url, setUrl] = useState('https://en.wikipedia.org/wiki/The_Lord_of_the_Rings_(film_series)');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [questionCount, setQuestionCount] = useState(5);
   const [loading, setLoading] = useState(false);
   const [extracting, setExtracting] = useState(false);
@@ -15,6 +19,22 @@ export default function Home() {
   const [error, setError] = useState('');
   const [aiReview, setAiReview] = useState('');
   const [loadingReview, setLoadingReview] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const SUPPORTED_EXTENSIONS = ['.pdf', '.docx', '.doc', '.txt', '.md', '.csv', '.json'];
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    setSelectedFile(file);
+    setError('');
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0] ?? null;
+    setSelectedFile(file);
+    setError('');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -25,28 +45,66 @@ export default function Home() {
     setLoading(true);
 
     try {
-      // Step 1: Extract content from URL
-      setExtracting(true);
-      const extractResponse = await fetch('/api/extract', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
+      let content: string;
+      let contentType: 'text' | 'pdf' = 'text';
+      let title: string;
 
-      if (!extractResponse.ok) {
-        const errorData = await extractResponse.json();
-        throw new Error(errorData.error || 'Failed to extract content');
+      if (inputMode === 'url') {
+        // Step 1: Extract content from URL
+        setExtracting(true);
+        const extractResponse = await fetch('/api/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+
+        if (!extractResponse.ok) {
+          const errorData = await extractResponse.json();
+          throw new Error(errorData.error || 'Failed to extract content');
+        }
+
+        const extracted = await extractResponse.json();
+        content = extracted.markdown;
+        title = extracted.title;
+        setExtracting(false);
+      } else {
+        // File upload mode
+        if (!selectedFile) {
+          throw new Error('Please select a file to upload');
+        }
+
+        setExtracting(true);
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+
+        const uploadResponse = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!uploadResponse.ok) {
+          const errorData = await uploadResponse.json();
+          throw new Error(errorData.error || 'Failed to process file');
+        }
+
+        const uploaded = await uploadResponse.json();
+        content = uploaded.content;
+        contentType = uploaded.type === 'pdf' ? 'pdf' : 'text';
+        title = uploaded.title;
+        setExtracting(false);
       }
-
-      const { markdown, title } = await extractResponse.json();
-      setExtracting(false);
 
       // Step 2: Generate quiz
       setGenerating(true);
       const quizResponse = await fetch('/api/generate-quiz', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ markdown, questionCount, title }),
+        body: JSON.stringify({
+          content,
+          contentType,
+          questionCount,
+          title,
+        }),
       });
 
       if (!quizResponse.ok) {
@@ -89,7 +147,7 @@ export default function Home() {
     }
     setError('');
     setShowResults(true);
-    
+
     // Generate AI review
     setLoadingReview(true);
     try {
@@ -112,6 +170,8 @@ export default function Home() {
 
   const handleReset = () => {
     setUrl('https://en.wikipedia.org/wiki/The_Lord_of_the_Rings_(film_series)');
+    setSelectedFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
     setQuiz(null);
     setUserAnswers([]);
     setShowResults(false);
@@ -133,18 +193,18 @@ export default function Home() {
 
   const getAnswerStatus = (questionIndex: number, optionIndex: number) => {
     if (!showResults) return 'default';
-    
+
     const userAnswer = userAnswers.find((a) => a.questionIndex === questionIndex);
     const question = quiz?.questions[questionIndex];
-    
+
     if (!question) return 'default';
-    
+
     const isCorrectAnswer = question.correctAnswer === optionIndex;
     const isUserAnswer = userAnswer?.selectedAnswer === optionIndex;
-    
+
     if (isCorrectAnswer) return 'correct';
     if (isUserAnswer && !isCorrectAnswer) return 'incorrect';
-    
+
     return 'default';
   };
 
@@ -157,7 +217,7 @@ export default function Home() {
             QuizIt <span className="text-primary-600">AI</span>
           </h1>
           <p className="text-xl text-gray-600">
-            Transform any web page into an interactive quiz
+            Transform any web page or document into an interactive quiz
           </p>
         </div>
 
@@ -165,22 +225,101 @@ export default function Home() {
         <div className="bg-white rounded-2xl shadow-xl p-8 mb-8">
           {!quiz ? (
             <form onSubmit={handleSubmit} className="space-y-6">
-              {/* URL Input */}
-              <div>
-                <label htmlFor="url" className="block text-sm font-medium text-gray-700 mb-2">
-                  Enter URL
-                </label>
-                <input
-                  type="url"
-                  id="url"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://example.com/article"
-                  required
-                  disabled={loading}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all disabled:bg-gray-100 disabled:cursor-not-allowed"
-                />
+              {/* Input Mode Tabs */}
+              <div className="flex rounded-lg border border-gray-200 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => { setInputMode('url'); setError(''); }}
+                  className={`flex-1 py-2.5 px-4 text-sm font-medium transition-all ${
+                    inputMode === 'url'
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  From URL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setInputMode('file'); setError(''); }}
+                  className={`flex-1 py-2.5 px-4 text-sm font-medium transition-all ${
+                    inputMode === 'file'
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  From File
+                </button>
               </div>
+
+              {inputMode === 'url' ? (
+                /* URL Input */
+                <div>
+                  <label htmlFor="url" className="block text-sm font-medium text-gray-700 mb-2">
+                    Enter URL
+                  </label>
+                  <input
+                    type="url"
+                    id="url"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    placeholder="https://example.com/article"
+                    required
+                    disabled={loading}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  />
+                </div>
+              ) : (
+                /* File Upload Input */
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Upload a File
+                  </label>
+                  <div
+                    onDrop={handleDrop}
+                    onDragOver={(e) => e.preventDefault()}
+                    onClick={() => !loading && fileInputRef.current?.click()}
+                    className={`w-full border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-all ${
+                      loading
+                        ? 'border-gray-200 bg-gray-50 cursor-not-allowed'
+                        : selectedFile
+                        ? 'border-primary-400 bg-primary-50'
+                        : 'border-gray-300 hover:border-primary-400 hover:bg-gray-50'
+                    }`}
+                  >
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept={SUPPORTED_EXTENSIONS.join(',')}
+                      onChange={handleFileChange}
+                      disabled={loading}
+                      className="hidden"
+                    />
+                    {selectedFile ? (
+                      <div className="space-y-1">
+                        <svg className="mx-auto h-8 w-8 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <p className="text-sm font-medium text-primary-700">{selectedFile.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {(selectedFile.size / 1024).toFixed(1)} KB · Click to change
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <svg className="mx-auto h-10 w-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                        </svg>
+                        <p className="text-sm text-gray-600">
+                          <span className="font-medium text-primary-600">Click to upload</span> or drag and drop
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          PDF, DOCX, DOC, TXT, MD, CSV, JSON
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Question Count Slider */}
               <div>
@@ -209,7 +348,7 @@ export default function Home() {
               {/* Submit Button */}
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || (inputMode === 'file' && !selectedFile)}
                 className="w-full bg-primary-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-primary-700 transition-all disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {loading ? (
@@ -218,7 +357,7 @@ export default function Home() {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    {extracting && 'Extracting content...'}
+                    {extracting && (inputMode === 'url' ? 'Extracting content...' : 'Processing file...')}
                     {generating && 'Generating quiz...'}
                   </>
                 ) : (
@@ -240,18 +379,18 @@ export default function Home() {
               <div className="space-y-6">
                 {quiz.questions.map((question, qIndex) => {
                   const userAnswer = userAnswers.find((a) => a.questionIndex === qIndex);
-                  
+
                   return (
                     <div key={qIndex} className="bg-gray-50 rounded-xl p-6">
                       <h3 className="text-lg font-semibold text-gray-900 mb-4">
                         {qIndex + 1}. {question.question}
                       </h3>
-                      
+
                       <div className="space-y-3">
                         {question.options.map((option, oIndex) => {
                           const status = getAnswerStatus(qIndex, oIndex);
                           const isSelected = userAnswer?.selectedAnswer === oIndex;
-                          
+
                           return (
                             <button
                               key={oIndex}
@@ -379,11 +518,9 @@ export default function Home() {
 
         {/* Footer */}
         <div className="text-center text-gray-600 text-sm">
-          <p>Powered by Jina AI and OpenAI</p>
+          <p>Powered by Jina AI and Claude</p>
         </div>
       </div>
     </div>
   );
 }
-
-

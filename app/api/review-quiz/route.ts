@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,23 +12,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.ANTHROPIC_API_KEY) {
       return NextResponse.json(
-        { error: 'OpenAI API key not configured' },
+        { error: 'Anthropic API key not configured' },
         { status: 500 }
       );
     }
 
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const model = process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
 
     // Build a summary of answers for the AI to review
     let answerSummary = '';
     quiz.questions.forEach((question: any, index: number) => {
       const userAnswer = userAnswers.find((a: any) => a.questionIndex === index);
       const isCorrect = userAnswer && question.correctAnswer === userAnswer.selectedAnswer;
-      
+
       answerSummary += `\nQuestion ${index + 1}: ${question.question}
 Correct Answer: ${question.options[question.correctAnswer]}
 User's Answer: ${userAnswer ? question.options[userAnswer.selectedAnswer] : 'Not answered'}
@@ -54,38 +53,19 @@ Your review should:
 
 Keep the tone friendly and supportive. Focus on the content topics, not just the score. Remember: 100 words maximum!`;
 
-    // Get model from environment variable, default to gpt-5-mini
-    const model = process.env.GPT_MODEL || 'gpt-5-mini';
-    
-    // Build completion parameters
-    const completionParams: any = {
+    const response = await client.messages.create({
       model,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a helpful educational assistant providing constructive feedback on quiz performance. Be encouraging, specific, and concise. Always limit your responses to 100 words or less.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-    };
-    
-    // Only add temperature for models that support it (not gpt-5-mini)
-    if (!model.includes('gpt-5-mini')) {
-      completionParams.temperature = 0.7;
-    }
-    
-    const completion = await openai.chat.completions.create(completionParams);
+      max_tokens: 512,
+      system:
+        'You are a helpful educational assistant providing constructive feedback on quiz performance. Be encouraging, specific, and concise. Always limit your responses to 100 words or less.',
+      messages: [{ role: 'user', content: prompt }],
+    });
 
-    console.log('Completion response:', JSON.stringify(completion, null, 2));
+    const review = response.content[0].type === 'text' ? response.content[0].text : '';
 
-    const review = completion.choices[0]?.message?.content;
     if (!review) {
-      console.error('No review content in response:', completion);
       return NextResponse.json(
-        { error: 'No review generated', details: 'Empty response from AI' },
+        { error: 'No review generated' },
         { status: 500 }
       );
     }
@@ -93,11 +73,9 @@ Keep the tone friendly and supportive. Focus on the content topics, not just the
     return NextResponse.json({ review });
   } catch (error: any) {
     console.error('Error generating review:', error);
-    console.error('Error details:', error.message, error.response?.data);
     return NextResponse.json(
       { error: 'Failed to generate review', message: error.message },
       { status: 500 }
     );
   }
 }
-
